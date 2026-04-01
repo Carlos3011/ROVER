@@ -18,8 +18,14 @@ class VisionNode(Node):
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
         self.cap.set(cv2.CAP_PROP_FPS, 30)
 
+        self.frame_count = 0
+
         if not self.cap.isOpened():
             self.get_logger().error("No se pudo abrir la cámara")
+
+        # Inicializar detector de personas (HOG Descriptor) para paro de emergencia
+        self.hog = cv2.HOGDescriptor()
+        self.hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
 
         self.timer = self.create_timer(0.1, self.process_frame)
 
@@ -28,16 +34,43 @@ class VisionNode(Node):
         if not ret:
             return
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        _, thresh = cv2.threshold(gray, 100, 255, cv2.THRESH_BINARY_INV)
-        texto_detectado = pytesseract.image_to_string(thresh, config='--psm 11').strip().upper()
-        
-        if "FIN" in texto_detectado:
-            msg_fin = String()
-            msg_fin.data = "fin,320,negro,N/A" 
-            self.publisher_.publish(msg_fin)
-            cv2.putText(frame, "LETRERO FIN ENCONTRADO", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+        self.frame_count += 1
 
+        # =======================================================
+        # 1. DETECCIÓN DE PERSONAS (EMERGENCY STOP)
+        # =======================================================
+        # Redimensionamos el frame localmente para no sobrecargar el CPU de la Raspberry
+        small_frame = cv2.resize(frame, (320, 240))
+        boxes, weights = self.hog.detectMultiScale(small_frame, winStride=(8,8), padding=(4,4), scale=1.05)
+        
+        if len(boxes) > 0:
+            msg_stop = String()
+            msg_stop.data = "persona,stop_all"
+            self.publisher_.publish(msg_stop)
+            cv2.putText(frame, "PERSONA DETECTADA - STOP ALL", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+
+        # =======================================================
+        # 2. OCR (Letrero FIN) - Se ejecuta cada 15 frames
+        # =======================================================
+        if self.frame_count % 15 == 0:
+            roi_top = frame[0:240, 0:640] 
+            gray = cv2.cvtColor(roi_top, cv2.COLOR_BGR2GRAY)
+            _, thresh = cv2.threshold(gray, 100, 255, cv2.THRESH_BINARY_INV)
+            
+            try:
+                texto_detectado = pytesseract.image_to_string(thresh, config='--psm 11').strip().upper()
+                
+                if "FIN" in texto_detectado:
+                    msg_fin = String()
+                    msg_fin.data = "fin,320,negro,N/A" 
+                    self.publisher_.publish(msg_fin)
+                    cv2.putText(frame, "LETRERO FIN ENCONTRADO", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+            except Exception as e:
+                pass 
+
+        # =======================================================
+        # 3. DETECCIÓN DE ROCAS POR COLOR
+        # =======================================================
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
         mask_red1 = cv2.inRange(hsv, np.array([0,100,100]), np.array([10,255,255]))
@@ -51,8 +84,31 @@ class VisionNode(Node):
         self.detect_color(mask_blue, frame, "azul")
         self.detect_color(mask_green, frame, "verde")
 
+        # =======================================================
+        # 4. DETECCIÓN DEL PANEL DE MANTENIMIENTO
+        # =======================================================
+        # Filtro HSV para aislar las zonas grises
+        mask_gray = cv2.inRange(hsv, np.array([0, 0, 50]), np.array([180, 50, 200]))
+        contours_gray, _ = cv2.findContours(mask_gray, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+        
+        if contours_gray:
+            largest_gray = max(contours_gray, key=cv2.contourArea)
+            if cv2.contourArea(largest_gray) > 5000: # Validación de tamaño mínimo
+                x, y, w, h = cv2.boundingRect(largest_gray)
+                cx = int(x + w/2)
+                
+                # Mapeo de pixeles en Y a altura en mm (ajustar constantes tras pruebas físicas)
+                altura_estimada_mm = int(1000 - (y * 2)) 
+                
+                msg_panel = String()
+                msg_panel.data = f"panel,{cx},{altura_estimada_mm}"
+                self.publisher_.publish(msg_panel)
+                
+                cv2.rectangle(frame, (x,y), (x+w,y+h), (255,0,255), 2)
+                cv2.putText(frame, f"PANEL: {altura_estimada_mm}mm", (x,y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255,0,255), 2)
+
         try:
-            cv2.imshow("Vision", frame)
+            cv2.imshow("Vision - Fat Rat", frame)
             cv2.waitKey(1)
         except:
             pass
@@ -66,18 +122,16 @@ class VisionNode(Node):
         largest_contour = max(contours, key=cv2.contourArea)
         area = cv2.contourArea(largest_contour)
 
+        # Filtro para evadir ruido
         if area > 500:
             x, y, w, h = cv2.boundingRect(largest_contour)
             cx = int(x + w/2)
             
-            if area < 1500:
-                tamano = "5cm3"
-            elif area < 3000:
-                tamano = "7cm3"
-            elif area < 5000:
-                tamano = "10cm3"
-            else:
-                tamano = "12cm3"
+            # Estimación de volúmenes
+            if area < 1500: tamano = "5cm3"
+            elif area < 3000: tamano = "7cm3"
+            elif area < 5000: tamano = "10cm3"
+            else: tamano = "12cm3"
 
             msg = String()
             msg.data = f"roca,{cx},{color_name},{tamano}"

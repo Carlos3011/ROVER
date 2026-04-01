@@ -13,7 +13,7 @@ class MappingNode(Node):
         self.subscription = self.create_subscription(String, '/detections', self.detection_callback, 10)
         self.sub_imu = self.create_subscription(String, '/terrain_status', self.terrain_cb, 10)
         
-        # ODOMETRÍA REAL 
+        # ODOMETRÍA - Recomendación: Cambiar /cmd_vel por un tópico que lea encoders reales o VSLAM
         self.cmd_sub = self.create_subscription(Twist, '/cmd_vel', self.cmd_cb, 10)
 
         self.x = 0.0
@@ -44,6 +44,7 @@ class MappingNode(Node):
         self.theta += self.current_w * dt
 
     def terrain_cb(self, msg):
+        # Este callback ahora debe recibir datos reales de un IMU o de la cámara de profundidad.
         tipo_terreno = msg.data.lower()
         nuevo_terreno = {"x": round(self.x, 2), "y": round(self.y, 2), "tipo": tipo_terreno}
         
@@ -55,7 +56,7 @@ class MappingNode(Node):
                 
         if is_new:
             self.map_terrain.append(nuevo_terreno)
-            self.get_logger().info(f"Accidente geográfico: {nuevo_terreno}")
+            self.get_logger().info(f"Accidente geográfico real registrado: {nuevo_terreno}")
 
     def detection_callback(self, msg):
         data = msg.data.split(',')
@@ -76,7 +77,16 @@ class MappingNode(Node):
         rock_x = self.x + distance * math.cos(self.theta + angle_rad)
         rock_y = self.y + distance * math.sin(self.theta + angle_rad)
 
-        rock = {"x": round(rock_x, 2), "y": round(rock_y, 2), "color": color, "tamano": tamano, "forma": "irregular"}
+        # MODIFICACIÓN TMR: Se agregó el campo 'textura' obligatorio. 
+        # Puede actualizarse luego con filtros de OpenCV (ej. análisis de varianza Laplaciana para rugosidad).
+        rock = {
+            "x": round(rock_x, 2), 
+            "y": round(rock_y, 2), 
+            "color": color, 
+            "tamano": tamano, 
+            "forma": "irregular",
+            "textura": "no_determinada" 
+        }
 
         is_new = True
         for r in self.map_rocks:
@@ -86,7 +96,7 @@ class MappingNode(Node):
                 
         if is_new:
             self.map_rocks.append(rock)
-            self.get_logger().info(f"Roca: {rock}")
+            self.get_logger().info(f"Roca mapeada: {rock}")
 
     def destroy_node(self):
         with open("mapa_lunar_oficial.txt", "w") as f:

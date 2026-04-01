@@ -19,12 +19,11 @@ class MissionNode(Node):
         self.state = "explore"
         self.last_detection = None
         self.last_time = time.time()
-        self.detection_count = 0
         self.targets = []
         self.current_target = None
-        
+
         self.collected_rocks = 0
-        self.max_rocks = 3
+        self.max_rocks = 10
 
         self.x = 0.0
         self.y = 0.0
@@ -32,8 +31,11 @@ class MissionNode(Node):
         self.home_x = 0.0
         self.home_y = 0.0
         self.last_action_time = time.time()
+        
+        # Variables para el mantenimiento dinámico
+        self.panel_height = None 
 
-        self.get_logger().info("Mission Node FINAL iniciado - Autonomía TMR 2026")
+        self.get_logger().info("FAT RAT - Mission Node Iniciado (Modo 100% Autónomo)")
         self.timer = self.create_timer(0.1, self.loop)
 
     def state_callback(self, msg):
@@ -62,6 +64,10 @@ class MissionNode(Node):
                 self.targets.append(cx)
                 if len(self.targets) > 10:
                     self.targets.pop(0)
+                    
+            if "panel" in label.lower():
+                # La visión pasa la altura aproximada (ej. panel,320,800)
+                self.panel_height = int(data_parts[2])
 
         except Exception as e:
             pass
@@ -71,10 +77,35 @@ class MissionNode(Node):
         self.x += linear * math.cos(self.theta) * dt
         self.y += linear * math.sin(self.theta) * dt
 
+    # =======================================================
+    # FUNCIÓN DE CINEMÁTICA INVERSA (IK) SIMPLIFICADA
+    # =======================================================
+    def send_arm_to_height(self, target_z):
+        """
+        Mapea una altura objetivo en Z (mm) a valores PWM para los servos.
+        NOTA: Deberás ajustar los rangos (out_min, out_max) según la longitud
+        física de los eslabones del FAT RAT.
+        """
+        # Restringimos la altura operativa entre 0 y 1000 mm según reglamento
+        z_clamped = max(0, min(target_z, 1000))
+        
+        # Ejemplo de interpolación lineal para el hombro (Canal 1)
+        # Asumiendo que 110 PWM es altura mínima y 510 PWM es altura máxima
+        pwm_hombro = int(110 + (z_clamped / 1000.0) * (510 - 110))
+        
+        # Ejemplo para el codo (Canal 2), compensando el movimiento del hombro
+        pwm_codo = int(510 - (z_clamped / 1000.0) * (510 - 200))
+        
+        # Mandamos los comandos SET que la ESP32 sí reconoce
+        self.arm_pub.publish(String(data=f"ARM:SET:1,{pwm_hombro}"))
+        self.arm_pub.publish(String(data=f"ARM:SET:2,{pwm_codo}"))
+        
+        self.get_logger().info(f"IK Calculado para Z={target_z}mm -> Hombro:{pwm_hombro}, Codo:{pwm_codo}")
+
     def loop(self):
         msg = Twist()
 
-        if time.time() - self.last_action_time > 12:
+        if time.time() - self.last_action_time > 12 and self.state in ["explore", "approach"]:
             self.state = "explore"
             self.targets.clear()
             self.current_target = None
@@ -83,6 +114,7 @@ class MissionNode(Node):
         if self.state == "explore":
             msg.linear.x = 0.18
             msg.angular.z = 0.25
+            
             if len(self.targets) > 5:
                 self.current_target = min(self.targets, key=lambda x: abs(x - 160))
                 self.state = "approach"
@@ -118,7 +150,7 @@ class MissionNode(Node):
                 self.arm_pub.publish(String(data="ARM:STOW"))
             elif tiempo_recoleccion > 4.0:
                 self.collected_rocks += 1
-                self.get_logger().info(f"Roca recolectada ({self.collected_rocks})")
+                self.get_logger().info(f"Roca recolectada ({self.collected_rocks}/{self.max_rocks})")
                 self.targets.clear()
                 self.current_target = None
                 self.state = "explore" 
@@ -149,27 +181,29 @@ class MissionNode(Node):
             elif 3.0 < tiempo_deposito < 3.5:
                 self.arm_pub.publish(String(data="ARM:SET:5,110")) 
             elif tiempo_deposito > 5.0:
-                self.get_logger().info(f"Depósito completado.")
+                self.get_logger().info(f"Depósito completado en Contenedor.")
                 self.arm_pub.publish(String(data="ARM:HOME"))
                 self.state = "finished"
 
         elif self.state == "mantenimiento":
             msg.linear.x = 0.0
             msg.angular.z = 0.0
+            
+            if self.panel_height is None:
+                self.get_logger().info("Buscando panel de mantenimiento...", throttle_duration_sec=2)
+                return
+
             t_mant = time.time() - self.last_action_time
+            base_z = self.panel_height 
             
             if t_mant < 1.0:
-                self.get_logger().info("Ejecutando Secuencia en Cápsula...")
-                self.arm_pub.publish(String(data="ARM:SET:1,400")) 
-            elif 2.0 < t_mant < 2.5:
-                self.arm_pub.publish(String(data="ARM:SET:0,350"))
-            elif 4.0 < t_mant < 4.5:
-                self.arm_pub.publish(String(data="ARM:SET:0,300"))
-            elif 6.0 < t_mant < 6.5:
-                self.arm_pub.publish(String(data="ARM:SET:0,400"))
-            elif 8.0 < t_mant < 8.5:
-                self.arm_pub.publish(String(data="ARM:SET:0,450"))
-            elif t_mant > 10.0:
+                self.get_logger().info("Posicionando brazo para Interruptor 1...")
+                # Usamos nuestra nueva función IK
+                self.send_arm_to_height(base_z + 50) 
+            elif 3.0 < t_mant < 3.5:
+                self.get_logger().info("Posicionando brazo para Botón 1...")
+                self.send_arm_to_height(base_z - 50) 
+            elif 5.0 < t_mant < 5.5:
                 self.get_logger().info("Secuencia finalizada.")
                 self.arm_pub.publish(String(data="ARM:HOME"))
                 self.state = "finished"
