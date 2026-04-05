@@ -4,6 +4,8 @@ from std_msgs.msg import String
 from geometry_msgs.msg import Twist
 import math
 import time
+from tf2_ros import Buffer, TransformListener
+from tf2_ros import LookupException, ConnectivityException, ExtrapolationException
 
 class MappingNode(Node):
 
@@ -13,9 +15,10 @@ class MappingNode(Node):
         self.subscription = self.create_subscription(String, '/detections', self.detection_callback, 10)
         self.sub_imu = self.create_subscription(String, '/terrain_status', self.terrain_cb, 10)
         
-        # ODOMETRÍA - Recomendación: Cambiar /cmd_vel por un tópico que lea encoders reales o VSLAM
-        self.cmd_sub = self.create_subscription(Twist, '/cmd_vel', self.cmd_cb, 10)
-
+        # Configuración de TF2 (Para escuchar la posición desde SLAM)
+        self.tf_buffer = Buffer()
+        self.tf_listener = TransformListener(self.tf_buffer, self)
+        
         self.x = 0.0
         self.y = 0.0
         self.theta = 0.0
@@ -30,18 +33,25 @@ class MappingNode(Node):
         self.get_logger().info("Mapping Node iniciado - Exploración Científica")
         self.timer = self.create_timer(0.1, self.update_position)
 
-    def cmd_cb(self, msg):
-        self.current_v = msg.linear.x
-        self.current_w = msg.angular.z
-
     def update_position(self):
-        now = time.time()
-        dt = now - self.last_time
-        self.last_time = now
+        # En lugar de calcular (v * dt), le preguntamos a ROS exactamente dónde estamos
+        try:
+            # Buscamos la transformación desde el 'map' hasta el 'base_link' (rover)
+            trans = self.tf_buffer.lookup_transform('map', 'base_link', rclpy.time.Time())
+            
+            # Extraer X y Y reales
+            self.x = trans.transform.translation.x
+            self.y = trans.transform.translation.y
+            
+            # Extraer rotación (Cuaternión a Ángulo Euler Z / Theta)
+            q = trans.transform.rotation
+            siny_cosp = 2 * (q.w * q.z + q.x * q.y)
+            cosy_cosp = 1 - 2 * (q.y * q.y + q.z * q.z)
+            self.theta = math.atan2(siny_cosp, cosy_cosp)
 
-        self.x += self.current_v * math.cos(self.theta) * dt
-        self.y += self.current_v * math.sin(self.theta) * dt
-        self.theta += self.current_w * dt
+        except (LookupException, ConnectivityException, ExtrapolationException):
+            # Si el SLAM aún no arranca o no hay mapa, ignoramos esta iteración
+            pass
 
     def terrain_cb(self, msg):
         # Este callback ahora debe recibir datos reales de un IMU o de la cámara de profundidad.
@@ -60,10 +70,12 @@ class MappingNode(Node):
 
     def detection_callback(self, msg):
         data = msg.data.split(',')
-        if len(data) != 4: 
+        
+        if len(data) != 5: 
             return
 
-        label, cx, color, tamano = data
+        label, cx, color, tamano, textura = data
+        
         if label != "roca":
             return
 
@@ -77,15 +89,13 @@ class MappingNode(Node):
         rock_x = self.x + distance * math.cos(self.theta + angle_rad)
         rock_y = self.y + distance * math.sin(self.theta + angle_rad)
 
-        # MODIFICACIÓN TMR: Se agregó el campo 'textura' obligatorio. 
-        # Puede actualizarse luego con filtros de OpenCV (ej. análisis de varianza Laplaciana para rugosidad).
         rock = {
             "x": round(rock_x, 2), 
             "y": round(rock_y, 2), 
             "color": color, 
             "tamano": tamano, 
             "forma": "irregular",
-            "textura": "no_determinada" 
+            "textura": textura 
         }
 
         is_new = True

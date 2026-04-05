@@ -48,22 +48,28 @@ class HardwareBridge(Node):
             pass
 
     def analyze_terrain(self, pitch, roll):
-        # Lógica científica para la convocatoria TMR
         terreno = None
         
-        if abs(pitch) > 18.0:
+        # Ponemos el umbral en 22.0 grados para asegurar la detección cuando el
+        # rover esté subiendo o bajando de frente, dando un margen de seguridad.
+        if abs(pitch) > 22.0 and abs(roll) < 15.0:
             terreno = "pendiente"
-        elif abs(roll) > 12.0:
-            terreno = "valle"
-        # Si la variación es brusca (requeriría guardar el historial), es un surco.
-        # Por simplicidad para el TMR, usamos ángulos combinados
-        elif abs(pitch) > 10.0 and abs(roll) > 10.0:
+            
+        # Un surco suele ser una zanja estrecha. Cuando el rover cae en uno, 
+        # normalmente se desestabiliza bruscamente en ambos ejes a la vez.
+        elif abs(pitch) >= 15.0 and abs(roll) >= 15.0:
             terreno = "surco"
+            
+        # Un valle es una depresión más amplia. Si el rover lo transita de lado,
+        # generará una inclinación lateral (roll) pronunciada.
+        elif abs(roll) > 18.0 and abs(pitch) < 15.0:
+            terreno = "valle"
 
         if terreno:
             msg = String()
             msg.data = terreno
             self.terrain_pub.publish(msg)
+            self.get_logger().info(f"Accidente geográfico detectado por IMU: {terreno} (P:{pitch:.1f}, R:{roll:.1f})")
 
     def _send_serial(self, data):
         if self.ser:

@@ -23,10 +23,6 @@ class VisionNode(Node):
         if not self.cap.isOpened():
             self.get_logger().error("No se pudo abrir la cámara")
 
-        # Inicializar detector de personas (HOG Descriptor) para paro de emergencia
-        self.hog = cv2.HOGDescriptor()
-        self.hog.setSVMDetector(cv2.HOGDescriptor_getDefaultPeopleDetector())
-
         self.timer = self.create_timer(0.1, self.process_frame)
 
     def process_frame(self):
@@ -37,20 +33,7 @@ class VisionNode(Node):
         self.frame_count += 1
 
         # =======================================================
-        # 1. DETECCIÓN DE PERSONAS (EMERGENCY STOP)
-        # =======================================================
-        # Redimensionamos el frame localmente para no sobrecargar el CPU de la Raspberry
-        small_frame = cv2.resize(frame, (320, 240))
-        boxes, weights = self.hog.detectMultiScale(small_frame, winStride=(8,8), padding=(4,4), scale=1.05)
-        
-        if len(boxes) > 0:
-            msg_stop = String()
-            msg_stop.data = "persona,stop_all"
-            self.publisher_.publish(msg_stop)
-            cv2.putText(frame, "PERSONA DETECTADA - STOP ALL", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
-
-        # =======================================================
-        # 2. OCR (Letrero FIN) - Se ejecuta cada 15 frames
+        # OCR (Letrero FIN) - Se ejecuta cada 15 frames
         # =======================================================
         if self.frame_count % 15 == 0:
             roi_top = frame[0:240, 0:640] 
@@ -69,7 +52,7 @@ class VisionNode(Node):
                 pass 
 
         # =======================================================
-        # 3. DETECCIÓN DE ROCAS POR COLOR
+        # DETECCIÓN DE ROCAS POR COLOR
         # =======================================================
         hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
 
@@ -85,7 +68,7 @@ class VisionNode(Node):
         self.detect_color(mask_green, frame, "verde")
 
         # =======================================================
-        # 4. DETECCIÓN DEL PANEL DE MANTENIMIENTO
+        # DETECCIÓN DEL PANEL DE MANTENIMIENTO
         # =======================================================
         # Filtro HSV para aislar las zonas grises
         mask_gray = cv2.inRange(hsv, np.array([0, 0, 50]), np.array([180, 50, 200]))
@@ -133,12 +116,32 @@ class VisionNode(Node):
             elif area < 5000: tamano = "10cm3"
             else: tamano = "12cm3"
 
+            # NUEVA LÓGICA DE TEXTURA (Varianza Laplaciana)
+            # Extraemos la Región de Interés (ROI) de la roca
+            roi_color = frame[y:y+h, x:x+w]
+            
+            # Prevenir errores si el ROI se sale del cuadro
+            if roi_color.size > 0:
+                roi_gray = cv2.cvtColor(roi_color, cv2.COLOR_BGR2GRAY)
+                
+                # Calculamos la varianza del Laplaciano
+                varianza = cv2.Laplacian(roi_gray, cv2.CV_64F).var()
+                
+                # Umbral empírico: Deberás calibrar este número "300"
+                if varianza > 300:
+                    textura = "rugosa"
+                else:
+                    textura = "lisa"
+            else:
+                textura = "no_determinada"
+
             msg = String()
-            msg.data = f"roca,{cx},{color_name},{tamano}"
+            msg.data = f"roca,{cx},{color_name},{tamano},{textura}"
             self.publisher_.publish(msg)
 
+            # Dibujamos en pantalla para monitoreo
             cv2.rectangle(frame, (x,y), (x+w,y+h), (0,255,0), 2)
-            cv2.putText(frame, f"{color_name} {tamano}", (x,y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 2)
+            cv2.putText(frame, f"{color_name} {tamano} {textura}", (x,y-10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 2)
 
 def main(args=None):
     rclpy.init(args=args)

@@ -196,15 +196,23 @@ class MissionNode(Node):
             t_mant = time.time() - self.last_action_time
             base_z = self.panel_height 
             
+            # Secuencia
             if t_mant < 1.0:
                 self.get_logger().info("Posicionando brazo para Interruptor 1...")
-                # Usamos nuestra nueva función IK
                 self.send_arm_to_height(base_z + 50) 
             elif 3.0 < t_mant < 3.5:
                 self.get_logger().info("Posicionando brazo para Botón 1...")
+                self.send_arm_to_height(base_z - 20) 
+            elif 6.0 < t_mant < 6.5:
+                self.get_logger().info("Posicionando brazo para Interruptor 2...")
+                # Agregamos un offset diferente para simular alcanzar otro interruptor
+                self.send_arm_to_height(base_z + 80) 
+            elif 9.0 < t_mant < 9.5:
+                self.get_logger().info("Posicionando brazo para Botón 2...")
+                # Agregamos un offset diferente para simular alcanzar otro botón
                 self.send_arm_to_height(base_z - 50) 
-            elif 5.0 < t_mant < 5.5:
-                self.get_logger().info("Secuencia finalizada.")
+            elif 12.0 < t_mant < 12.5:
+                self.get_logger().info("Secuencia finalizada. Activación de cápsula completa.")
                 self.arm_pub.publish(String(data="ARM:HOME"))
                 self.state = "finished"
 
