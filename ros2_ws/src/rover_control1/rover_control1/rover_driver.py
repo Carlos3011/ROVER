@@ -108,11 +108,17 @@ class HardwareBridge(Node):
             terreno = "valle"
         elif abs(pitch) > 10.0 and abs(roll) > 10.0:
             terreno = "surco"
+            
+        # Un valle es una depresión más amplia. Si el rover lo transita de lado,
+        # generará una inclinación lateral (roll) pronunciada.
+        elif abs(roll) > 18.0 and abs(pitch) < 15.0:
+            terreno = "valle"
 
         if terreno:
             msg = String()
             msg.data = terreno
             self.terrain_pub.publish(msg)
+            self.get_logger().info(f"Accidente geográfico detectado por IMU: {terreno} (P:{pitch:.1f}, R:{roll:.1f})")
 
     def _send_serial(self, data):
         if not self._connect_serial():

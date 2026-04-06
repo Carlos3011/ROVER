@@ -53,10 +53,6 @@ class MappingNode(Node):
         )
         self.timer = self.create_timer(update_period_s, self.update_position)
 
-    def cmd_cb(self, msg):
-        self.current_v = msg.linear.x
-        self.current_w = msg.angular.z
-
     def update_position(self):
         now = self.get_clock().now()
         dt = (now - self.last_time).nanoseconds / 1e9
