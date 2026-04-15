@@ -75,20 +75,6 @@ class MissionNode(Node):
         )
         self.timer = self.create_timer(loop_period_s, self.loop)
 
-    def scan_callback(self, msg):
-        """Procesa datos del LiDAR para detectar obstáculos frontales."""
-        self.last_scan = msg # Guardamos el scan para la función get_lidar_distance
-        center = len(msg.ranges) // 2
-        window = 20 # Rango de grados al centro
-
-        valid = [
-            r for r in msg.ranges[center-window:center+window]
-            if math.isfinite(r)
-        ]
-
-        if valid:
-            self.front_distance = min(valid)
-
     def state_callback(self, msg):
         self.state = msg.data
         self._last_action_time_s = time.monotonic()
