@@ -5,25 +5,70 @@ from std_msgs.msg import String
 import serial
 import time
 
+
 class HardwareBridge(Node):
     def __init__(self):
         super().__init__('hardware_bridge')
-        self._last_serial_error_log = 0.0
-        try:
-            self.ser = serial.Serial('/dev/rover_esp32', 115200, timeout=0.05)
-            self.get_logger().info("Conectado a la ESP32 (Motores + Servos + IMU)")
-        except Exception:
-            self.ser = None
-            self.get_logger().warning("ESP32 no detectada", exc_info=True)
+        self.declare_parameter('serial_port', '/dev/ttyUSB0')
+        self.declare_parameter('serial_baudrate', 115200)
+        self.declare_parameter('serial_timeout_s', 0.05)
+        self.declare_parameter('reconnect_period_s', 2.0)
+        self.declare_parameter('read_period_s', 0.05)
+
+        self._serial_port = (
+            self.get_parameter('serial_port').get_parameter_value().string_value
+        )
+        self._serial_baudrate = (
+            self.get_parameter('serial_baudrate').get_parameter_value().integer_value
+        )
+        self._serial_timeout_s = (
+            self.get_parameter('serial_timeout_s')
+            .get_parameter_value()
+            .double_value
+        )
+        self._reconnect_period_s = (
+            self.get_parameter('reconnect_period_s')
+            .get_parameter_value()
+            .double_value
+        )
+        self._read_period_s = (
+            self.get_parameter('read_period_s').get_parameter_value().double_value
+        )
+
+        self.ser = None
+        self._last_reconnect_attempt_s = 0.0
+        self._connect_serial(log_success=True)
 
         self.cmd_sub = self.create_subscription(Twist, '/cmd_vel', self.cmd_callback, 10)
         self.arm_sub = self.create_subscription(String, '/arm_cmd', self.arm_callback, 10)
-        
-        # Publicadores
+
         self.terrain_pub = self.create_publisher(String, '/terrain_status', 10)
-        self.weight_pub = self.create_publisher(String, '/rock_weight', 10)
-        
-        self.timer = self.create_timer(0.05, self.read_serial)
+
+        self.timer = self.create_timer(self._read_period_s, self.read_serial)
+
+    def _connect_serial(self, log_success=False):
+        if self.ser is not None:
+            return True
+
+        now_s = time.monotonic()
+        if now_s - self._last_reconnect_attempt_s < self._reconnect_period_s:
+            return False
+
+        self._last_reconnect_attempt_s = now_s
+        try:
+            self.ser = serial.Serial(
+                self._serial_port,
+                int(self._serial_baudrate),
+                timeout=float(self._serial_timeout_s),
+            )
+        except (serial.SerialException, OSError) as exc:
+            self.ser = None
+            self.get_logger().warning(f'ESP32 no disponible: {exc}')
+            return False
+
+        if log_success:
+            self.get_logger().info('Conectado a la ESP32')
+        return True
 
     def cmd_callback(self, msg):
         linear = max(min(msg.linear.x, 1.0), -1.0)
@@ -36,41 +81,32 @@ class HardwareBridge(Node):
         self._send_serial(data)
 
     def read_serial(self):
-        if not self.ser: return
+        if not self._connect_serial():
+            return
         try:
-            max_lines = 50
-            lines_read = 0
-            while self.ser.in_waiting > 0 and lines_read < max_lines:
-                lines_read += 1
-                line = self.ser.readline().decode('utf-8', errors='ignore').strip()
+            while self.ser is not None and self.ser.in_waiting > 0:
+                line = (
+                    self.ser.readline()
+                    .decode('utf-8', errors='replace')
+                    .strip()
+                )
                 if line.startswith("I,"):
                     parts = line.split(',')
                     if len(parts) >= 3:
                         pitch = float(parts[1])
                         roll = float(parts[2])
                         self.analyze_terrain(pitch, roll)
-                    if len(parts) >= 4:
-                        peso = float(parts[3])
-                        msg_peso = String()
-                        msg_peso.data = str(peso)
-                        self.weight_pub.publish(msg_peso)
-        except Exception:
-            now = time.monotonic()
-            if now - self._last_serial_error_log > 2.0:
-                self.get_logger().warning("Error leyendo UART", exc_info=True)
-                self._last_serial_error_log = now
+        except Exception as exc:
+            self.get_logger().warning(f'Error leyendo serial: {exc}')
 
     def analyze_terrain(self, pitch, roll):
         terreno = None
-        
-        # Ponemos el umbral en 22.0 grados para asegurar la detección cuando el
-        # rover esté subiendo o bajando de frente, dando un margen de seguridad.
-        if abs(pitch) > 22.0 and abs(roll) < 15.0:
+
+        if abs(pitch) > 18.0:
             terreno = "pendiente"
-            
-        # Un surco suele ser una zanja estrecha. Cuando el rover cae en uno, 
-        # normalmente se desestabiliza bruscamente en ambos ejes a la vez.
-        elif abs(pitch) >= 15.0 and abs(roll) >= 15.0:
+        elif abs(roll) > 12.0:
+            terreno = "valle"
+        elif abs(pitch) > 10.0 and abs(roll) > 10.0:
             terreno = "surco"
             
         # Un valle es una depresión más amplia. Si el rover lo transita de lado,
@@ -85,17 +121,25 @@ class HardwareBridge(Node):
             self.get_logger().info(f"Accidente geográfico detectado por IMU: {terreno} (P:{pitch:.1f}, R:{roll:.1f})")
 
     def _send_serial(self, data):
-        if self.ser:
-            try:
+        if not self._connect_serial():
+            return
+        try:
+            if self.ser is not None:
                 self.ser.write(data.encode())
+        except Exception as exc:
+            self.get_logger().warning(f'Error escribiendo serial: {exc}')
+            try:
+                self.ser.close()
             except Exception:
-                now = time.monotonic()
-                if now - self._last_serial_error_log > 2.0:
-                    self.get_logger().warning("Error escribiendo UART", exc_info=True)
-                    self._last_serial_error_log = now
+                pass
+            self.ser = None
 
     def destroy_node(self):
-        if self.ser: self.ser.close()
+        if self.ser is not None:
+            try:
+                self.ser.close()
+            except Exception:
+                pass
         super().destroy_node()
 
 def main(args=None):
